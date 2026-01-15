@@ -1,0 +1,48 @@
+# ModelForge - Dependencies
+# Backboard.io SDK
+backboard-sdk>=1.0.0
+
+# Streamlit UI
+streamlit>=1.30.0
+
+# Data handling
+pandas>=2.0.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# HuggingFace Hub (for model uploads)
+huggingface_hub>=0.20.0
+
+# PDF parsing
+PyPDF2>=3.0.0
+
+# Web scraping (for URL context)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Utilities
+tqdm>=4.65.0
+
+# ==========================================
+# Fine-Tuning Dependencies (Optional)
+# ==========================================
+# These require CUDA GPU. Install based on your CUDA version:
+#
+# For CUDA 12.1+ (recommended):
+#   pip install unsloth
+#   pip install --no-deps trl peft accelerate bitsandbytes
+#
+# For CUDA 11.8:
+#   pip install unsloth[cu118]
+#
+# Full Unsloth install (if above doesn't work):
+#   pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+#
+# Required packages for fine-tuning:
+# - unsloth (core training library)
+# - trl (transformers reinforcement learning)
+# - peft (parameter efficient fine-tuning)
+# - accelerate (distributed training)
+# - bitsandbytes (quantization)
+# - datasets (HuggingFace datasets)
