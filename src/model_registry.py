@@ -176,7 +176,7 @@ class BackboardModelRegistry:
         self._providers_cache = None
 
 
-# Fallback models (minimal set for offline/error scenarios)
+# Fallback models
 FALLBACK_MODELS: List[ModelInfo] = [
     ModelInfo(
         provider="openai",

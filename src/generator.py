@@ -178,7 +178,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
         model_name: str = "gpt-4o",
         custom_prompt: Optional[str] = None,
         existing_thread_id: Optional[str] = None,
-        existing_assistant_id: Optional[str] = None
+        existing_assistant_id: Optional[str] = None,
+        web_search_context: Optional[str] = None
     ) -> List[GeneratedSample]:
         """
         Generate samples using Mode 1: General Chat with Memory.
@@ -192,6 +193,7 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
             custom_prompt: Optional custom prompt template (use {topic} placeholder)
             existing_thread_id: Thread ID for appending to existing dataset
             existing_assistant_id: Assistant ID for appending to existing dataset
+            web_search_context: Optional web search results to include as context
             
         Returns:
             List of generated samples
@@ -209,7 +211,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
                 model_name=model_name,
                 topic=topic,
                 existing_thread_id=existing_thread_id,
-                existing_assistant_id=existing_assistant_id
+                existing_assistant_id=existing_assistant_id,
+                web_search_context=web_search_context
             )
         )
         
@@ -228,7 +231,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
         model_name: str = "gpt-4o",
         custom_prompt: Optional[str] = None,
         existing_thread_id: Optional[str] = None,
-        existing_assistant_id: Optional[str] = None
+        existing_assistant_id: Optional[str] = None,
+        web_search_context: Optional[str] = None
     ) -> List[GeneratedSample]:
         """
         Generate samples using Mode 2: Knowledge Injection (RAG).
@@ -243,6 +247,7 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
             custom_prompt: Optional custom prompt
             existing_thread_id: Thread ID for appending
             existing_assistant_id: Assistant ID for appending
+            web_search_context: Optional web search results to include as context
             
         Returns:
             List of generated samples grounded in documents
@@ -259,7 +264,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
                 topic=topic,
                 document_ids=document_ids,
                 existing_thread_id=existing_thread_id,
-                existing_assistant_id=existing_assistant_id
+                existing_assistant_id=existing_assistant_id,
+                web_search_context=web_search_context
             )
         )
         
@@ -278,7 +284,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
         model_name: str = "qwen-2.5-coder-32b-instruct",
         custom_prompt: Optional[str] = None,
         existing_thread_id: Optional[str] = None,
-        existing_assistant_id: Optional[str] = None
+        existing_assistant_id: Optional[str] = None,
+        web_search_context: Optional[str] = None
     ) -> List[GeneratedSample]:
         """
         Generate samples using Mode 3: Code Specialist.
@@ -293,6 +300,7 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
             custom_prompt: Optional custom prompt
             existing_thread_id: Thread ID for appending
             existing_assistant_id: Assistant ID for appending
+            web_search_context: Optional web search results to include as context
             
         Returns:
             List of code training samples
@@ -310,7 +318,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
                 topic=topic,
                 code_language=code_language,
                 existing_thread_id=existing_thread_id,
-                existing_assistant_id=existing_assistant_id
+                existing_assistant_id=existing_assistant_id,
+                web_search_context=web_search_context
             )
         )
         
@@ -329,7 +338,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
         model_name: str = "gpt-4o",
         custom_prompt: Optional[str] = None,
         existing_thread_id: Optional[str] = None,
-        existing_assistant_id: Optional[str] = None
+        existing_assistant_id: Optional[str] = None,
+        web_search_context: Optional[str] = None
     ) -> List[GeneratedSample]:
         """
         Generate samples using Mode 4: Agent / Tool Use.
@@ -344,6 +354,7 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
             custom_prompt: Optional custom prompt
             existing_thread_id: Thread ID for appending
             existing_assistant_id: Assistant ID for appending
+            web_search_context: Optional web search results to include as context
             
         Returns:
             List of tool-use training samples
@@ -360,7 +371,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
                 topic=topic,
                 tools=tools,
                 existing_thread_id=existing_thread_id,
-                existing_assistant_id=existing_assistant_id
+                existing_assistant_id=existing_assistant_id,
+                web_search_context=web_search_context
             )
         )
         
@@ -378,7 +390,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
         model_name: str = "deepseek-r1",
         custom_prompt: Optional[str] = None,
         existing_thread_id: Optional[str] = None,
-        existing_assistant_id: Optional[str] = None
+        existing_assistant_id: Optional[str] = None,
+        web_search_context: Optional[str] = None
     ) -> List[GeneratedSample]:
         """
         Generate samples using Mode 5: Reasoning (Chain of Thought).
@@ -392,6 +405,7 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
             custom_prompt: Optional custom prompt
             existing_thread_id: Thread ID for appending
             existing_assistant_id: Assistant ID for appending
+            web_search_context: Optional web search results to include as context
             
         Returns:
             List of reasoning training samples with <think> tags
@@ -407,7 +421,8 @@ Output as JSON with detailed reasoning in <think> tags before the final answer."
                 model_name=model_name,
                 topic=topic,
                 existing_thread_id=existing_thread_id,
-                existing_assistant_id=existing_assistant_id
+                existing_assistant_id=existing_assistant_id,
+                web_search_context=web_search_context
             )
         )
         

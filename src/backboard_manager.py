@@ -181,6 +181,7 @@ class BackboardManager:
         Handles multiple formats:
         - JSON with instruction/input/output
         - JSON with question/answer
+        - JSON with challenge/solution (code mode)
         - Plain text (treated as output to the prompt)
         """
         import json
@@ -196,11 +197,31 @@ class BackboardManager:
             
             data = json.loads(clean_content)
             
-            # Handle various JSON structures
+            # Handle various JSON structures with multiple key name conventions
             if isinstance(data, dict):
-                instruction = data.get("instruction") or data.get("question") or data.get("prompt", "")
-                input_text = data.get("input") or data.get("context", "")
-                output = data.get("output") or data.get("answer") or data.get("response", "")
+                instruction = (
+                    data.get("instruction") or 
+                    data.get("question") or 
+                    data.get("challenge") or 
+                    data.get("problem") or 
+                    data.get("prompt") or
+                    data.get("task") or
+                    ""
+                )
+                input_text = (
+                    data.get("input") or 
+                    data.get("context") or 
+                    data.get("constraints") or
+                    ""
+                )
+                output = (
+                    data.get("output") or 
+                    data.get("answer") or 
+                    data.get("solution") or 
+                    data.get("code") or
+                    data.get("response") or
+                    ""
+                )
                 
                 return GeneratedSample(
                     instruction=instruction,
@@ -330,113 +351,93 @@ class BackboardManager:
         
         return doc_id
     
-    async def fetch_url_content(self, url: str) -> tuple[str, str, str]:
+    async def web_search(self, query: str, max_results: int = 5) -> Dict[str, Any]:
         """
-        Fetch content from a URL and add it to the document cache for RAG.
+        Perform a web search using Perplexity API and return results as context.
         
         Args:
-            url: The URL to fetch content from
+            query: The search query
+            max_results: Maximum number of results to return (1-10)
             
         Returns:
-            Tuple of (doc_id, title, content_preview) or raises exception
+            Dict with 'content' (formatted search results), 'sources' (list of URLs), 
+            and 'summary' (brief summary)
         """
-        import hashlib
-        import re
+        import os
+        import httpx
         
-        try:
-            import requests
-            from bs4 import BeautifulSoup
-        except ImportError:
-            raise ImportError(
-                "Web scraping requires 'requests' and 'beautifulsoup4'. "
-                "Install with: pip install requests beautifulsoup4"
+        # Get Perplexity API key from environment
+        perplexity_key = os.getenv("PERPLEXITY_API_KEY")
+        if not perplexity_key:
+            raise ValueError(
+                "PERPLEXITY_API_KEY not found. Set it in your .env file. "
+                "Get an API key at https://www.perplexity.ai/settings/api"
             )
         
-        # Ensure document cache exists
-        if not hasattr(self, '_document_cache'):
-            self._document_cache = {}
-        
-        # Validate URL
-        url = url.strip()
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
         try:
-            # Fetch the webpage with timeout and headers
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-            }
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            # Parse HTML with BeautifulSoup
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract title
-            title = soup.title.string.strip() if soup.title and soup.title.string else url
-            title = re.sub(r'\s+', ' ', title)[:100]  # Clean and limit title length
-            
-            # Remove unwanted elements
-            for element in soup.find_all(['script', 'style', 'nav', 'footer', 'header', 
-                                          'aside', 'iframe', 'noscript', 'svg', 'form']):
-                element.decompose()
-            
-            # Try to find main content areas first
-            main_content = None
-            for selector in ['article', 'main', '[role="main"]', '.content', '.post-content', 
-                           '.article-body', '.entry-content', '#content', '#main']:
-                found = soup.select_one(selector)
-                if found:
-                    main_content = found
-                    break
-            
-            # Fall back to body if no main content found
-            if main_content is None:
-                main_content = soup.body if soup.body else soup
-            
-            # Extract text
-            text = main_content.get_text(separator='\n', strip=True)
-            
-            # Clean up the text
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            # Remove very short lines that are likely noise
-            lines = [line for line in lines if len(line) > 10 or line.endswith(('.', ':', '?', '!'))]
-            content_str = '\n'.join(lines)
-            
-            # Remove excessive whitespace
-            content_str = re.sub(r'\n{3,}', '\n\n', content_str)
-            content_str = re.sub(r' {2,}', ' ', content_str)
-            
-            if len(content_str) < 50:
-                raise ValueError("Page content too short or could not be extracted")
-            
-            # Generate document ID from URL
-            doc_id = 'url_' + hashlib.md5(url.encode()).hexdigest()[:12]
-            
-            # Store in cache
-            self._document_cache[doc_id] = {
-                'name': f"🌐 {title}",
-                'content': content_str,
-                'url': url,
-                'type': 'web'
-            }
-            
-            # Create preview (first 200 chars)
-            preview = content_str[:200] + '...' if len(content_str) > 200 else content_str
-            
-            print(f"Fetched URL {url}: {len(content_str)} characters extracted")
-            
-            return doc_id, title, preview
-            
-        except requests.exceptions.Timeout:
-            raise TimeoutError(f"Request timed out for URL: {url}")
-        except requests.exceptions.RequestException as e:
-            raise ConnectionError(f"Failed to fetch URL: {str(e)}")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.perplexity.ai/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {perplexity_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "sonar",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a research assistant. Provide comprehensive, factual information with sources. Format your response clearly with key facts and details."
+                            },
+                            {
+                                "role": "user", 
+                                "content": query
+                            }
+                        ],
+                        "max_tokens": 2000,
+                        "temperature": 0.2,
+                        "return_citations": True
+                    }
+                )
+                
+                if response.status_code != 200:
+                    raise RuntimeError(f"Perplexity API error: {response.status_code} - {response.text}")
+                
+                data = response.json()
+                
+                # Extract content and citations
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                citations = data.get("citations", [])
+                
+                # Format sources
+                sources = []
+                for i, citation in enumerate(citations[:max_results], 1):
+                    if isinstance(citation, str):
+                        sources.append(citation)
+                    elif isinstance(citation, dict):
+                        sources.append(citation.get("url", citation.get("source", f"Source {i}")))
+                
+                # Create a formatted context block
+                formatted_content = f"""=== WEB SEARCH RESULTS ===
+Query: {query}
+
+{content}
+
+Sources:
+""" + "\n".join([f"[{i+1}] {src}" for i, src in enumerate(sources)])
+                
+                return {
+                    'content': formatted_content,
+                    'sources': sources,
+                    'summary': content[:500] + "..." if len(content) > 500 else content,
+                    'query': query
+                }
+                
+        except httpx.TimeoutException:
+            raise TimeoutError(f"Web search timed out for query: {query}")
         except Exception as e:
-            raise RuntimeError(f"Error processing URL content: {str(e)}")
-    
+            raise RuntimeError(f"Web search failed: {str(e)}")
+
     def get_cached_documents(self) -> List[Dict[str, Any]]:
         """
         Get all cached documents (files and URLs).
@@ -757,6 +758,7 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
         batch_size: int = 5,  # Generate this many samples per API call
         existing_thread_id: Optional[str] = None,  # For appending to existing datasets
         existing_assistant_id: Optional[str] = None,  # For appending to existing datasets
+        web_search_context: Optional[str] = None,  # Web search results to include
         **kwargs  # Mode-specific parameters
     ) -> tuple[List[GeneratedSample], str, str]:
         """
@@ -775,6 +777,7 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
             batch_size: Number of samples to request per API call (default: 5)
             existing_thread_id: Optional thread ID to reuse for memory continuity
             existing_assistant_id: Optional assistant ID to reuse
+            web_search_context: Optional web search results to inject as context
             **kwargs: Mode-specific parameters (document_ids, tools, code_language, etc.)
             
         Returns:
@@ -823,6 +826,7 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
                     batch_num=batch_num + 1,
                     llm_provider=llm_provider,
                     model_name=model_name,
+                    web_search_context=web_search_context,
                     **kwargs
                 )
                 samples.extend(batch_samples)
@@ -858,6 +862,7 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
         batch_num: int,
         llm_provider: str,
         model_name: str,
+        web_search_context: Optional[str] = None,
         **kwargs
     ) -> List[GeneratedSample]:
         """
@@ -870,30 +875,39 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
             batch_prompt = self._build_rag_batch_prompt(
                 topic=topic,
                 batch_size=batch_size,
-                document_ids=kwargs.get('document_ids', [])
+                document_ids=kwargs.get('document_ids', []),
+                web_search_context=web_search_context,
+                custom_instructions=base_prompt
             )
         elif mode == "code" or mode == "code_specialist":
             batch_prompt = self._build_code_batch_prompt(
                 topic=topic,
                 batch_size=batch_size,
-                code_language=kwargs.get('code_language', 'python')
+                code_language=kwargs.get('code_language', 'python'),
+                web_search_context=web_search_context,
+                custom_instructions=base_prompt
             )
         elif mode == "agent" or mode == "tool_use":
             batch_prompt = self._build_tool_batch_prompt(
                 topic=topic,
                 batch_size=batch_size,
-                tools=kwargs.get('tools', [])
+                tools=kwargs.get('tools', []),
+                web_search_context=web_search_context,
+                custom_instructions=base_prompt
             )
         elif mode == "reasoning" or mode == "chain_of_thought":
             batch_prompt = self._build_reasoning_batch_prompt(
                 topic=topic,
-                batch_size=batch_size
+                batch_size=batch_size,
+                web_search_context=web_search_context,
+                custom_instructions=base_prompt
             )
         else:  # general_chat
             batch_prompt = self._build_chat_batch_prompt(
                 topic=topic,
                 batch_size=batch_size,
-                base_prompt=base_prompt
+                base_prompt=base_prompt,
+                web_search_context=web_search_context
             )
         
         # Make single API call with memory for deduplication
@@ -912,18 +926,37 @@ Ensure the output includes detailed reasoning in <think> tags before the final a
         # Parse multiple samples from response
         return self._parse_batch_response(content, batch_size)
     
-    def _build_chat_batch_prompt(self, topic: str, batch_size: int, base_prompt: str) -> str:
+    def _build_chat_batch_prompt(self, topic: str, batch_size: int, base_prompt: str, web_search_context: Optional[str] = None) -> str:
         """Build batch prompt for general chat mode."""
+        web_context_section = ""
+        if web_search_context:
+            web_context_section = f"""
+You have access to the following web search results for reference:
+
+{web_search_context}
+
+Use this information to make your examples more accurate and up-to-date.
+"""
+        
+        # Include custom instructions if provided
+        custom_instructions_section = ""
+        if base_prompt and base_prompt.strip():
+            custom_instructions_section = f"""
+
+Additional Instructions:
+{base_prompt.strip()}
+"""
+        
         return f"""Generate {batch_size} UNIQUE and DIVERSE training examples for an AI assistant.
 
 Topic/Domain: {topic or 'general knowledge'}
-
+{web_context_section}
 Requirements:
 - Each example must be completely different from the others
 - Each example must be different from any you've generated before in this conversation
 - Cover different aspects, difficulty levels, and question types
 - Make them realistic and useful for training
-
+{custom_instructions_section}
 CRITICAL: Output ONLY a raw JSON array. NO introduction, NO explanation, NO markdown code blocks. Start directly with [ and end with ].
 
 Format:
@@ -931,7 +964,7 @@ Format:
 
 ["""
 
-    def _build_rag_batch_prompt(self, topic: str, batch_size: int, document_ids: List[str]) -> str:
+    def _build_rag_batch_prompt(self, topic: str, batch_size: int, document_ids: List[str], web_search_context: Optional[str] = None, custom_instructions: Optional[str] = None) -> str:
         """Build batch prompt for RAG mode with document context."""
         doc_cache = getattr(self, '_document_cache', {})
         
@@ -945,56 +978,86 @@ Format:
         
         document_context = "\n\n".join(document_parts)
         
-        if not document_context.strip():
-            return self._build_chat_batch_prompt(topic, batch_size, "")
+        # Add web search context if available
+        web_context_section = ""
+        if web_search_context:
+            web_context_section = f"""\n=== WEB SEARCH RESULTS ===\n{web_search_context}\n"""
         
-        return f"""You have access to the following documents:
+        combined_context = document_context + web_context_section
+        
+        if not combined_context.strip():
+            return self._build_chat_batch_prompt(topic, batch_size, custom_instructions or "")
+        
+        # Include custom instructions if provided
+        custom_instructions_section = ""
+        if custom_instructions and custom_instructions.strip():
+            custom_instructions_section = f"""\nAdditional Instructions:\n{custom_instructions.strip()}\n"""
+        
+        return f"""You have access to the following documents and web search results:
 
-{document_context}
+{combined_context}
 
-Generate {batch_size} UNIQUE question-answer training examples based ONLY on information in the documents above.
+Generate {batch_size} UNIQUE question-answer training examples based on information in the context above.
 
 Topic focus: {topic or 'document content'}
 
 Requirements:
-- Each question must be answerable from the document content
-- Use specific facts, quotes, and details from the documents
+- Each question must be answerable from the document/web content
+- Use specific facts, quotes, and details from the sources
 - Each example must be completely different
-- Cover different sections and aspects of the documents
+- Cover different sections and aspects of the content
 - Do NOT repeat any questions from earlier in this conversation
-
+{custom_instructions_section}
 CRITICAL: Output ONLY a raw JSON array with exactly {batch_size} objects. NO introduction text, NO explanation, NO markdown. Start directly with [ and end with ].
 
 Each object MUST have this exact format:
-{{"instruction": "A specific question about the document content", "input": "", "output": "The detailed answer based on the documents"}}
+{{"instruction": "A specific question about the content", "input": "", "output": "The detailed answer based on the sources"}}
 
 ["""
 
-    def _build_code_batch_prompt(self, topic: str, batch_size: int, code_language: str) -> str:
+    def _build_code_batch_prompt(self, topic: str, batch_size: int, code_language: str, web_search_context: Optional[str] = None, custom_instructions: Optional[str] = None) -> str:
         """Build batch prompt for code generation mode."""
+        web_context_section = ""
+        if web_search_context:
+            web_context_section = f"""\nUse the following web search results as reference for best practices and modern approaches:\n\n{web_search_context}\n"""
+        
+        # Include custom instructions if provided
+        custom_instructions_section = ""
+        if custom_instructions and custom_instructions.strip():
+            custom_instructions_section = f"""\nAdditional Instructions:\n{custom_instructions.strip()}\n"""
+        
         return f"""Generate {batch_size} UNIQUE {code_language} programming challenges and solutions.
 
 Topic/Domain: {topic or 'programming fundamentals'}
-
+{web_context_section}
 Requirements:
 - Each challenge must be completely different in concept
 - Include varying difficulty levels (easy, medium, hard)
 - Solutions must be complete, working code with comments
 - Cover different programming concepts
 - Do NOT repeat any challenges from earlier in this conversation
-
+{custom_instructions_section}
 CRITICAL: Output ONLY a raw JSON array. NO introduction, NO explanation, NO markdown. Start directly with [ and end with ].
 
 ["""
 
-    def _build_tool_batch_prompt(self, topic: str, batch_size: int, tools: List[Dict]) -> str:
+    def _build_tool_batch_prompt(self, topic: str, batch_size: int, tools: List[Dict], web_search_context: Optional[str] = None, custom_instructions: Optional[str] = None) -> str:
         """Build batch prompt for tool/agent mode."""
         tools_json = json.dumps(tools, indent=2) if tools else "[]"
+        
+        web_context_section = ""
+        if web_search_context:
+            web_context_section = f"""\nAdditional context from web search:\n{web_search_context}\n"""
+        
+        # Include custom instructions if provided
+        custom_instructions_section = ""
+        if custom_instructions and custom_instructions.strip():
+            custom_instructions_section = f"""\nAdditional Instructions:\n{custom_instructions.strip()}\n"""
         
         return f"""You have access to these tools:
 
 {tools_json}
-
+{web_context_section}
 Generate {batch_size} UNIQUE scenarios where a user needs help and the AI must use the appropriate tool(s).
 
 Topic: {topic or 'general tasks'}
@@ -1005,7 +1068,7 @@ Requirements:
 - Include the tool call with proper arguments in the output
 - Vary the complexity and combinations of tools
 - Do NOT repeat scenarios from earlier in this conversation
-
+{custom_instructions_section}
 CRITICAL: Output ONLY a raw JSON array with exactly {batch_size} objects. NO introduction text, NO explanation, NO markdown. Start directly with [ and end with ].
 
 Format each object as:
@@ -1013,19 +1076,28 @@ Format each object as:
 
 ["""
 
-    def _build_reasoning_batch_prompt(self, topic: str, batch_size: int) -> str:
+    def _build_reasoning_batch_prompt(self, topic: str, batch_size: int, web_search_context: Optional[str] = None, custom_instructions: Optional[str] = None) -> str:
         """Build batch prompt for reasoning/CoT mode."""
+        web_context_section = ""
+        if web_search_context:
+            web_context_section = f"""\nUse the following web search results as reference for factual accuracy:\n\n{web_search_context}\n"""
+        
+        # Include custom instructions if provided
+        custom_instructions_section = ""
+        if custom_instructions and custom_instructions.strip():
+            custom_instructions_section = f"""\nAdditional Instructions:\n{custom_instructions.strip()}\n"""
+        
         return f"""Generate {batch_size} UNIQUE complex reasoning problems with step-by-step solutions.
 
 Topic/Domain: {topic or 'logical reasoning, math, and analytical puzzles'}
-
+{web_context_section}
 Requirements:
 - Each problem must require multi-step reasoning
 - Include the thinking process in <think>...</think> tags in the output
 - Vary problem types: logic puzzles, math problems, analysis, deduction
 - Each problem must be completely different
 - Do NOT repeat problems from earlier in this conversation
-
+{custom_instructions_section}
 CRITICAL: Output ONLY a raw JSON array with exactly {batch_size} objects. NO introduction text, NO explanation, NO markdown. Start directly with [ and end with ].
 
 Format each object as:
@@ -1116,13 +1188,41 @@ Format each object as:
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
-                        # Handle output that might be a dict or string
-                        output = item.get("output", "")
+                        # Handle various key naming conventions
+                        # For instruction/question/challenge/problem
+                        instruction = (
+                            item.get("instruction") or 
+                            item.get("question") or 
+                            item.get("challenge") or 
+                            item.get("problem") or 
+                            item.get("prompt") or
+                            item.get("task") or
+                            ""
+                        )
+                        
+                        # For input/context
+                        input_text = (
+                            item.get("input") or 
+                            item.get("context") or 
+                            item.get("constraints") or
+                            ""
+                        )
+                        
+                        # For output/answer/solution/code/response
+                        output = (
+                            item.get("output") or 
+                            item.get("answer") or 
+                            item.get("solution") or 
+                            item.get("code") or
+                            item.get("response") or
+                            ""
+                        )
+                        
                         if isinstance(output, dict):
                             output = json.dumps(output, indent=2)
                         
-                        instruction = str(item.get("instruction", ""))
-                        input_text = str(item.get("input", ""))
+                        instruction = str(instruction)
+                        input_text = str(input_text)
                         output = str(output)
                         
                         # Only add if sample has valid content
@@ -1137,22 +1237,114 @@ Format each object as:
                             print(f"Warning: Skipping empty sample: {item}")
                             
             elif isinstance(data, dict):
-                # Single object returned
-                output = data.get("output", "")
-                if isinstance(output, dict):
-                    output = json.dumps(output, indent=2)
+                # Check if this is a malformed response where samples are nested inside "output"
+                # This happens when LLM returns: {"instruction": "...", "output": [{...}, {...}]}
+                output_value = data.get("output") or data.get("answer") or data.get("response")
                 
-                instruction = str(data.get("instruction", ""))
-                input_text = str(data.get("input", ""))
-                output = str(output)
+                # Check if output contains a JSON array (either as list or string)
+                nested_samples = None
+                if isinstance(output_value, list) and len(output_value) > 0:
+                    # Output is already a list - check if it contains sample dicts
+                    if isinstance(output_value[0], dict) and ("instruction" in output_value[0] or "output" in output_value[0]):
+                        nested_samples = output_value
+                        print(f"Detected nested samples array in 'output' field ({len(nested_samples)} items)")
+                elif isinstance(output_value, str) and output_value.strip().startswith("["):
+                    # Output is a JSON string that looks like an array
+                    try:
+                        parsed_output = json.loads(output_value)
+                        if isinstance(parsed_output, list) and len(parsed_output) > 0:
+                            if isinstance(parsed_output[0], dict) and ("instruction" in parsed_output[0] or "output" in parsed_output[0]):
+                                nested_samples = parsed_output
+                                print(f"Detected nested samples JSON string in 'output' field ({len(nested_samples)} items)")
+                    except json.JSONDecodeError:
+                        pass
                 
-                if is_valid_sample(instruction, input_text, output):
-                    samples.append(GeneratedSample(
-                        instruction=instruction,
-                        input=input_text,
-                        output=output,
-                        metadata={"format": "json_single"}
-                    ))
+                if nested_samples:
+                    # Extract samples from the nested array
+                    for item in nested_samples:
+                        if isinstance(item, dict):
+                            instruction = (
+                                item.get("instruction") or 
+                                item.get("question") or 
+                                item.get("challenge") or 
+                                item.get("problem") or 
+                                item.get("prompt") or
+                                item.get("task") or
+                                ""
+                            )
+                            input_text = (
+                                item.get("input") or 
+                                item.get("context") or 
+                                item.get("constraints") or
+                                ""
+                            )
+                            output = (
+                                item.get("output") or 
+                                item.get("answer") or 
+                                item.get("solution") or 
+                                item.get("code") or
+                                item.get("response") or
+                                ""
+                            )
+                            
+                            if isinstance(output, dict):
+                                output = json.dumps(output, indent=2)
+                            
+                            instruction = str(instruction)
+                            input_text = str(input_text)
+                            output = str(output)
+                            
+                            if is_valid_sample(instruction, input_text, output):
+                                samples.append(GeneratedSample(
+                                    instruction=instruction,
+                                    input=input_text,
+                                    output=output,
+                                    metadata={"format": "json_nested_extracted"}
+                                ))
+                            else:
+                                print(f"Warning: Skipping empty nested sample: {item}")
+                else:
+                    # Single object returned - handle various key naming conventions
+                    instruction = (
+                        data.get("instruction") or 
+                        data.get("question") or 
+                        data.get("challenge") or 
+                        data.get("problem") or 
+                        data.get("prompt") or
+                        data.get("task") or
+                        ""
+                    )
+                    
+                    input_text = (
+                        data.get("input") or 
+                        data.get("context") or 
+                        data.get("constraints") or
+                        ""
+                    )
+                    
+                    output = (
+                        data.get("output") or 
+                        data.get("answer") or 
+                        data.get("solution") or 
+                        data.get("code") or
+                        data.get("response") or
+                        ""
+                    )
+                    
+                    if isinstance(output, dict):
+                        output = json.dumps(output, indent=2)
+                    
+                    instruction = str(instruction)
+                    input_text = str(input_text)
+                    output = str(output)
+                    
+                    if is_valid_sample(instruction, input_text, output):
+                        samples.append(GeneratedSample(
+                            instruction=instruction,
+                            input=input_text,
+                            output=output,
+                            metadata={"format": "json_single"}
+                        ))
                 
         except json.JSONDecodeError as e:
             print(f"JSON parse error: {e}")

@@ -1148,8 +1148,9 @@ def start_training_async(
             container_script_path = f"/workspace/work/{script_name}"
             
             # Run with real-time output (with UTF-8 encoding for Windows compatibility)
+            # Added -i flag for interactive output to prevent buffering
             process = subprocess.Popen(
-                ["docker", "exec", container_id, "python", "-u", container_script_path],
+                ["docker", "exec", "-i", container_id, "python", "-u", container_script_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

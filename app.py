@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import json
 import asyncio
 import time
+import os
 
 from src.backboard_manager import BackboardManager, run_async
 from src.generator import DataGenerator
@@ -378,34 +379,73 @@ class Dataset:
         self.save()
     
     def save(self):
-        """Save dataset to JSONL file"""
+        """Save dataset to JSONL file and metadata to companion JSON file"""
+        # Save samples to JSONL
         with open(self.file_path, 'w', encoding='utf-8') as f:
             for sample in self.samples:
                 f.write(json.dumps(sample, ensure_ascii=False) + '\n')
-    
+
+        # Save metadata to companion file
+        meta_path = self.file_path.replace('.jsonl', '.meta.json')
+        metadata = {
+            'id': str(self.id),
+            'name': self.name,
+            'mode': self.mode,
+            'mode_name': self.mode_name,
+            'thread_id': str(self.thread_id) if self.thread_id else None,
+            'assistant_id': str(self.assistant_id) if self.assistant_id else None,
+            'document_ids': self.document_ids,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2)
+
     @classmethod
     def load_from_file(cls, file_path: str) -> 'Dataset':
-        """Load dataset from existing JSONL file"""
+        """Load dataset from existing JSONL file and metadata from companion JSON"""
         samples = []
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     samples.append(json.loads(line))
-        
-        # Extract info from filename
+
+        # Try to load metadata from companion file
+        meta_path = file_path.replace('.jsonl', '.meta.json')
+        metadata = {}
+        if Path(meta_path).exists():
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                print(f"Error loading metadata: {e}")
+
+        # Extract info from filename as fallback
         filename = Path(file_path).stem
         parts = filename.split('_', 1)
-        dataset_id = parts[0] if len(parts) > 1 else filename[:8]
-        name = parts[1] if len(parts) > 1 else filename
-        
+        dataset_id = metadata.get('id') or (parts[0] if len(parts) > 1 else filename[:8])
+        name = metadata.get('name') or (parts[1].replace('_', ' ') if len(parts) > 1 else filename)
+
+        # Parse created_at from metadata
+        created_at = None
+        if metadata.get('created_at'):
+            try:
+                created_at = datetime.fromisoformat(metadata['created_at'])
+            except:
+                pass
+        if not created_at:
+            created_at = datetime.fromtimestamp(Path(file_path).stat().st_mtime)
+
         return cls(
             id=dataset_id,
-            name=name.replace('_', ' '),
-            mode=1,
-            mode_name="Imported Dataset",
+            name=name,
+            mode=metadata.get('mode', 1),
+            mode_name=metadata.get('mode_name', "Imported Dataset"),
             file_path=file_path,
             samples=samples,
-            created_at=datetime.fromtimestamp(Path(file_path).stat().st_mtime)
+            created_at=created_at,
+            thread_id=metadata.get('thread_id'),
+            assistant_id=metadata.get('assistant_id'),
+            document_ids=metadata.get('document_ids', [])
         )
 
 
@@ -592,7 +632,7 @@ def render_dashboard():
             print(f"Failed to auto-load models: {e}")
     
     # Header
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2, col3 = st.columns([4, 1, 3])
     with col1:
         st.markdown(f"""
         <div style="margin-bottom: 2rem;">
@@ -617,7 +657,7 @@ def render_dashboard():
             st.rerun()
     
     with col3:
-        col3a, col3b, col3c = st.columns(3)
+        col3a, col3b, col3c, col3d = st.columns(4)
         with col3a:
             if st.button("[TRAIN]", use_container_width=True):
                 st.session_state.view = 'fine_tuning'
@@ -627,6 +667,10 @@ def render_dashboard():
                 st.session_state.view = 'inference'
                 st.rerun()
         with col3c:
+            if st.button("🤗 DEPLOY", use_container_width=True):
+                st.session_state.view = 'hf_deploy'
+                st.rerun()
+        with col3d:
             if st.button("[NEW]", type="primary", use_container_width=True):
                 st.session_state.show_create_pipeline = True
                 st.rerun()
@@ -972,85 +1016,6 @@ def render_chat_interface(pipeline: Pipeline):
             st.success(f"[READY] {len(uploaded_files)} document(s) uploaded")
             pipeline.config["uploaded_files"] = uploaded_files
         
-        # Web URL Section
-        st.markdown("#### [WEB_RESOURCES]")
-        st.caption("Add website links to use as context for data generation")
-        
-        # Initialize URL list in session state
-        if 'fetched_urls' not in st.session_state:
-            st.session_state.fetched_urls = []  # [{id, name, url, preview}]
-        
-        # URL input
-        url_input = st.text_area(
-            "Enter URLs (one per line)",
-            placeholder="https://example.com/article\nhttps://docs.example.com/guide",
-            key="url_input",
-            height=100
-        )
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("[FETCH_URLS]", key="fetch_urls_btn", use_container_width=True):
-                if not st.session_state.get('api_key'):
-                    st.error("[ERROR] Please set your Backboard API key in the sidebar first")
-                elif url_input.strip():
-                    urls = [u.strip() for u in url_input.strip().split('\n') if u.strip()]
-                    
-                    # Create/get shared manager for URL fetching
-                    from src.backboard_manager import BackboardManager
-                    if st.session_state.shared_backboard_manager is None:
-                        st.session_state.shared_backboard_manager = BackboardManager(
-                            api_key=st.session_state.api_key
-                        )
-                    manager = st.session_state.shared_backboard_manager
-                    
-                    with st.spinner(f"Fetching {len(urls)} URL(s)..."):
-                        for url in urls:
-                            try:
-                                # Check if already fetched
-                                already_fetched = any(u['url'] == url for u in st.session_state.fetched_urls)
-                                if already_fetched:
-                                    st.warning(f"[WARN] Already fetched: {url[:50]}...")
-                                    continue
-                                
-                                doc_id, title, preview = asyncio.run(
-                                    manager.fetch_url_content(url)
-                                )
-                                st.session_state.fetched_urls.append({
-                                    'id': doc_id,
-                                    'name': title,
-                                    'url': url,
-                                    'preview': preview
-                                })
-                                st.success(f"[SUCCESS] Fetched: {title[:50]}...")
-                            except Exception as e:
-                                st.error(f"[ERROR] Failed to fetch {url[:30]}...: {str(e)}")
-                    st.rerun()
-                else:
-                    st.warning("Please enter at least one URL")
-        
-        with col2:
-            if st.button("[CLEAR_URLS]", key="clear_urls_btn", use_container_width=True):
-                st.session_state.fetched_urls = []
-                if st.session_state.shared_backboard_manager and hasattr(st.session_state.shared_backboard_manager, '_document_cache'):
-                    # Only clear URL-based entries
-                    st.session_state.shared_backboard_manager._document_cache = {
-                        k: v for k, v in st.session_state.shared_backboard_manager._document_cache.items()
-                        if not k.startswith('url_')
-                    }
-                st.rerun()
-        
-        # Display fetched URLs
-        if st.session_state.fetched_urls:
-            st.markdown(f"**[FETCHED_CONTENT] ({len(st.session_state.fetched_urls)} sources):**")
-            for i, url_data in enumerate(st.session_state.fetched_urls):
-                with st.expander(f"[URL] {url_data['name'][:60]}...", expanded=False):
-                    st.caption(f"URL: {url_data['url']}")
-                    st.text(url_data['preview'])
-            
-            # Store URL doc IDs for generation
-            pipeline.config["url_doc_ids"] = [u['id'] for u in st.session_state.fetched_urls]
-        
         style = st.selectbox(
             "Generation Style",
             ["qa_from_docs", "summarization"],
@@ -1238,6 +1203,42 @@ def render_chat_interface(pipeline: Pipeline):
                     for f in rag_files:
                         st.write(f"• {f.name} ({f.size / 1024:.1f} KB)")
     
+    # ==========================================
+    # Web Search (Available for ALL modes)
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### 🔍 WEB SEARCH CONTEXT")
+    
+    enable_web_search = st.checkbox(
+        "Enable Web Search",
+        value=pipeline.config.get("enable_web_search", False),
+        help="Search the web for relevant context during generation (uses Perplexity API)",
+        key="enable_web_search"
+    )
+    pipeline.config["enable_web_search"] = enable_web_search
+    
+    if enable_web_search:
+        st.markdown("""
+        <div style="background: #0a1628; border-left: 3px solid #3b82f6; padding: 0.5rem; margin-bottom: 1rem; font-size: 0.85rem; color: #a0c4ff;">
+            🌐 Web search will be performed when generation starts. Results will be injected as context for the AI.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        web_search_query = st.text_area(
+            "Search Query",
+            placeholder="Enter your search query, e.g., 'Latest Python 3.12 features' or 'Best practices for REST API design'",
+            help="What should we search for? This query will be sent to Perplexity to gather relevant context.",
+            key="web_search_query",
+            value=pipeline.config.get("web_search_query", pipeline.config.get("topic", "")),
+            height=80
+        )
+        pipeline.config["web_search_query"] = web_search_query
+        
+        if not web_search_query.strip():
+            st.warning("⚠️ Enter a search query to enable web search")
+        else:
+            st.success(f"✓ Will search: '{web_search_query[:50]}{'...' if len(web_search_query) > 50 else ''}'")
+    
     # Common parameters
     st.markdown("---")
     num_samples = st.number_input(
@@ -1298,9 +1299,12 @@ def render_chat_interface(pipeline: Pipeline):
     if not pipeline.config.get("topic"):
         issues.append("[ERR] No topic provided")
         ready_to_generate = False
-    if pipeline.mode == 2 and not pipeline.config.get("uploaded_files"):
-        issues.append("[ERR] No documents uploaded for RAG mode")
-        ready_to_generate = False
+    if pipeline.mode == 2:
+        has_docs = pipeline.config.get("uploaded_files")
+        has_web_search = pipeline.config.get("enable_web_search") and pipeline.config.get("web_search_query", "").strip()
+        if not has_docs and not has_web_search:
+            issues.append("[ERR] Upload documents or enable web search for RAG mode")
+            ready_to_generate = False
     if pipeline.mode == 4 and not pipeline.config.get("tools"):
         issues.append("[ERR] No tools defined for Agent mode")
         ready_to_generate = False
@@ -1344,17 +1348,88 @@ def render_chat_interface(pipeline: Pipeline):
                 
                 samples = []
                 
+                # Perform web search if enabled (for all modes)
+                web_search_context = None
+                if pipeline.config.get("enable_web_search") and pipeline.config.get("web_search_query"):
+                    search_query = pipeline.config["web_search_query"]
+                    add_log(pipeline, "INFO", f"Performing web search: '{search_query[:50]}...'")
+                    try:
+                        import asyncio
+                        search_results = asyncio.run(manager.web_search(search_query))
+                        web_search_context = search_results.get("content", "")
+                        sources = search_results.get("sources", [])
+                        if web_search_context:
+                            add_log(pipeline, "INFO", f"Web search completed - {len(sources)} sources found")
+                            # Store results for reference
+                            pipeline.config["web_search_results"] = search_results
+                        else:
+                            add_log(pipeline, "WARN", "Web search returned no content")
+                    except Exception as e:
+                        add_log(pipeline, "ERROR", f"Web search failed: {str(e)}")
+                
+                # Process RAG documents for non-Mode-2 modes (Mode 2 handles this differently)
+                document_context = None
+                if pipeline.mode != 2 and pipeline.use_rag and pipeline.config.get("uploaded_files"):
+                    import asyncio
+                    uploaded_files = pipeline.config.get("uploaded_files", [])
+                    add_log(pipeline, "INFO", f"Processing {len(uploaded_files)} document(s) for RAG...")
+                    
+                    doc_contents = []
+                    for file in uploaded_files:
+                        try:
+                            # Upload document to extract content
+                            doc_id = asyncio.run(manager.upload_document(
+                                file_path=file.name,
+                                file_content=file.read(),
+                                file_name=file.name
+                            ))
+                            # Get the extracted content
+                            if hasattr(manager, '_document_cache') and doc_id in manager._document_cache:
+                                doc_data = manager._document_cache[doc_id]
+                                doc_name = doc_data.get('name', file.name)
+                                doc_content = doc_data.get('content', '')
+                                if doc_content:
+                                    doc_contents.append(f"=== DOCUMENT: {doc_name} ===\n{doc_content}")
+                                    add_log(pipeline, "SUCCESS", f"Extracted content from: {file.name}")
+                        except Exception as e:
+                            add_log(pipeline, "ERROR", f"Failed to process {file.name}: {str(e)}")
+                    
+                    if doc_contents:
+                        document_context = "\n\n".join(doc_contents)
+                        add_log(pipeline, "INFO", f"Document context ready: {len(document_context)} characters")
+                
+                # Combine web search and document context
+                combined_context = None
+                if web_search_context and document_context:
+                    combined_context = f"{document_context}\n\n{web_search_context}"
+                    add_log(pipeline, "INFO", "Using combined context: documents + web search")
+                elif document_context:
+                    combined_context = document_context
+                    add_log(pipeline, "INFO", "Using document context only")
+                elif web_search_context:
+                    combined_context = web_search_context
+                    # Already logged above
+                
+                # Use combined_context for web_search_context parameter
+                if combined_context:
+                    web_search_context = combined_context
+                
                 # Route to appropriate generation method
                 if pipeline.mode == 1:
                     add_log(pipeline, "INFO", f"Mode 1: Generating {num_samples} chat samples...")
+                    custom_instructions = pipeline.config.get("custom_instructions", "")
+                    if custom_instructions:
+                        add_log(pipeline, "INFO", f"Using custom instructions: {custom_instructions[:50]}...")
                     samples = generator.generate_mode1_samples(
                         num_samples=num_samples,
                         topic=pipeline.config["topic"],
                         style=pipeline.config.get("style", "general_qa"),
                         llm_provider=llm_provider,
                         model_name=model_name,
+                        custom_prompt=custom_instructions if custom_instructions else None,
                         existing_thread_id=existing_thread_id,
-                        existing_assistant_id=existing_assistant_id
+                        existing_assistant_id=existing_assistant_id,
+                        web_search_context=web_search_context
                     )
                     
                 elif pipeline.mode == 2:
@@ -1362,16 +1437,7 @@ def render_chat_interface(pipeline: Pipeline):
                     document_ids = []
                     import asyncio
                     
-                    # Copy URL document cache from shared manager to generation manager
-                    if st.session_state.shared_backboard_manager and hasattr(st.session_state.shared_backboard_manager, '_document_cache'):
-                        if not hasattr(manager, '_document_cache'):
-                            manager._document_cache = {}
-                        # Copy URL-based entries
-                        for k, v in st.session_state.shared_backboard_manager._document_cache.items():
-                            if k.startswith('url_'):
-                                manager._document_cache[k] = v
-                    
-                    # Upload documents first
+                    # Upload documents if provided
                     for file in pipeline.config.get("uploaded_files", []):
                         doc_id = asyncio.run(manager.upload_document(
                             file_path=file.name,
@@ -1381,18 +1447,25 @@ def render_chat_interface(pipeline: Pipeline):
                         document_ids.append(doc_id)
                         add_log(pipeline, "SUCCESS", f"Uploaded document: {file.name}")
                     
-                    # Add URL document IDs (already fetched)
-                    url_doc_ids = pipeline.config.get("url_doc_ids", [])
-                    if url_doc_ids:
-                        document_ids.extend(url_doc_ids)
-                        add_log(pipeline, "SUCCESS", f"Added {len(url_doc_ids)} web sources")
+                    # Check what context sources we have
+                    has_web_search = bool(web_search_context)
                     
-                    if not document_ids:
-                        add_log(pipeline, "WARNING", "No documents or URLs provided, generation may be limited")
+                    if document_ids and has_web_search:
+                        add_log(pipeline, "INFO", f"Using {len(document_ids)} document(s) + web search context")
+                    elif document_ids:
+                        add_log(pipeline, "INFO", f"Using {len(document_ids)} document(s)")
+                    elif has_web_search:
+                        add_log(pipeline, "INFO", "Using web search context only")
+                    else:
+                        add_log(pipeline, "WARNING", "No context sources provided")
                     
                     pipeline.config["document_ids"] = document_ids
                     
-                    add_log(pipeline, "INFO", f"Generating {num_samples} RAG samples from {len(document_ids)} source(s)...")
+                    source_count = len(document_ids) + (1 if has_web_search else 0)
+                    add_log(pipeline, "INFO", f"Generating {num_samples} RAG samples from {source_count} source(s)...")
+                    custom_instructions = pipeline.config.get("custom_instructions", "")
+                    if custom_instructions:
+                        add_log(pipeline, "INFO", f"Using custom instructions: {custom_instructions[:50]}...")
                     samples = generator.generate_mode2_samples(
                         num_samples=num_samples,
                         document_ids=document_ids,
@@ -1400,12 +1473,17 @@ def render_chat_interface(pipeline: Pipeline):
                         style=pipeline.config.get("style", "qa_from_docs"),
                         llm_provider=llm_provider,
                         model_name=model_name,
+                        custom_prompt=custom_instructions if custom_instructions else None,
                         existing_thread_id=existing_thread_id,
-                        existing_assistant_id=existing_assistant_id
+                        existing_assistant_id=existing_assistant_id,
+                        web_search_context=web_search_context
                     )
                     
                 elif pipeline.mode == 3:
                     add_log(pipeline, "INFO", f"Mode 3: Generating {num_samples} code samples...")
+                    custom_instructions = pipeline.config.get("custom_instructions", "")
+                    if custom_instructions:
+                        add_log(pipeline, "INFO", f"Using custom instructions: {custom_instructions[:50]}...")
                     samples = generator.generate_mode3_samples(
                         num_samples=num_samples,
                         topic=pipeline.config["topic"],
@@ -1413,12 +1491,17 @@ def render_chat_interface(pipeline: Pipeline):
                         code_language=pipeline.config.get("code_language", "python"),
                         llm_provider=llm_provider or "qwen",
                         model_name=model_name or "qwen-2.5-coder-32b-instruct",
+                        custom_prompt=custom_instructions if custom_instructions else None,
                         existing_thread_id=existing_thread_id,
-                        existing_assistant_id=existing_assistant_id
+                        existing_assistant_id=existing_assistant_id,
+                        web_search_context=web_search_context
                     )
                     
                 elif pipeline.mode == 4:
                     add_log(pipeline, "INFO", f"Mode 4: Generating {num_samples} agent samples...")
+                    custom_instructions = pipeline.config.get("custom_instructions", "")
+                    if custom_instructions:
+                        add_log(pipeline, "INFO", f"Using custom instructions: {custom_instructions[:50]}...")
                     samples = generator.generate_mode4_samples(
                         num_samples=num_samples,
                         tools=pipeline.config.get("tools", []),
@@ -1426,20 +1509,27 @@ def render_chat_interface(pipeline: Pipeline):
                         style=pipeline.config.get("style", "tool_selection"),
                         llm_provider=llm_provider,
                         model_name=model_name,
+                        custom_prompt=custom_instructions if custom_instructions else None,
                         existing_thread_id=existing_thread_id,
-                        existing_assistant_id=existing_assistant_id
+                        existing_assistant_id=existing_assistant_id,
+                        web_search_context=web_search_context
                     )
                     
                 elif pipeline.mode == 5:
                     add_log(pipeline, "INFO", f"Mode 5: Generating {num_samples} reasoning samples...")
+                    custom_instructions = pipeline.config.get("custom_instructions", "")
+                    if custom_instructions:
+                        add_log(pipeline, "INFO", f"Using custom instructions: {custom_instructions[:50]}...")
                     samples = generator.generate_mode5_samples(
                         num_samples=num_samples,
                         topic=pipeline.config["topic"],
                         style=pipeline.config.get("style", "logical_reasoning"),
                         llm_provider=llm_provider or "deepseek",
                         model_name=model_name or "deepseek-r1",
+                        custom_prompt=custom_instructions if custom_instructions else None,
                         existing_thread_id=existing_thread_id,
-                        existing_assistant_id=existing_assistant_id
+                        existing_assistant_id=existing_assistant_id,
+                        web_search_context=web_search_context
                     )
                 
                 # Update pipeline with results
@@ -1480,6 +1570,7 @@ def render_chat_interface(pipeline: Pipeline):
                         assistant_id=new_assistant_id
                     )
                     st.session_state.datasets[new_dataset.id] = new_dataset
+                    new_dataset.save()  # Ensure metadata is written to disk immediately
                     add_log(pipeline, "SUCCESS", f"Created new dataset: {new_dataset.name}")
                 
                 add_log(pipeline, "SUCCESS", f"Exported to: {output_file}")
@@ -1561,6 +1652,397 @@ def main():
         render_finetuning()
     elif st.session_state.view == 'inference':
         render_inference()
+    elif st.session_state.view == 'hf_deploy':
+        render_hf_deploy()
+
+
+# ==================== MEMORY VISUALIZATION ====================
+
+def render_memory_visualization(dataset):
+    """
+    Render interactive node-based memory visualization for a dataset showing
+    how Backboard's memory has been used to prevent data duplication.
+    """
+    st.markdown("---")
+    st.markdown("""
+    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 1rem;">
+        <h3 style="margin: 0; color: #f96124;">MEMORY_NETWORK</h3>
+        <span style="color: #8c6b5d; font-size: 0.75rem; font-family: 'JetBrains Mono', monospace;">
+            [BACKBOARD.IO MEMORY SYSTEM]
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Check if dataset has assistant_id for memory lookup
+    if not dataset.assistant_id:
+        st.markdown("""
+        <div class="industrial-plate" style="border-left: 4px solid #666;">
+            <div style="color: #888; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;">
+                <span style="color: #eab308;">[WARNING]</span> No assistant ID linked to this dataset.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Try to get API key
+    api_key = st.session_state.get('api_key') or os.getenv("BACKBOARD_API_KEY")
+    if not api_key:
+        st.markdown("""
+        <div class="industrial-plate" style="border-left: 4px solid #ef4444;">
+            <div style="color: #888; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;">
+                <span style="color: #ef4444;">[ERROR]</span> Backboard API key not configured.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Fetch memories from Backboard API
+    with st.spinner("Fetching memories from Backboard..."):
+        try:
+            manager = BackboardManager(api_key=api_key)
+            memories_data = run_async(manager.get_all_memories(dataset.assistant_id))
+        except Exception as e:
+            st.error(f"[ERROR] Failed to fetch memories: {e}")
+            return
+
+    memories = memories_data.get("memories", [])
+    total_count = memories_data.get("total_count", len(memories))
+
+    # Memory Stats Header
+    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+
+    with col_stat1:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value" style="color: #f96124;">{total_count}</div>
+            <div class="stat-label">MEMORIES STORED</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stat2:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value" style="color: #22c55e;">{dataset.sample_count}</div>
+            <div class="stat-label">SAMPLES GENERATED</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stat3:
+        efficiency = (total_count / dataset.sample_count * 100) if dataset.sample_count > 0 else 0
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value" style="color: #3b82f6;">{efficiency:.1f}%</div>
+            <div class="stat-label">MEMORY DENSITY</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_stat4:
+        thread_id_str = str(dataset.thread_id) if dataset.thread_id else ""
+        thread_display = thread_id_str[:8] if thread_id_str else "N/A"
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value" style="color: #a855f7; font-size: 1.2rem;">{thread_display}...</div>
+            <div class="stat-label">THREAD ID</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Node Graph Visualization
+    if memories:
+        # Prepare memory data for JavaScript (limit to 50 for performance)
+        display_memories = memories[:50]
+        nodes_data = []
+        for i, memory in enumerate(display_memories):
+            content = str(memory.get("content", ""))
+            memory_id = str(memory.get("id", "unknown"))
+            score = memory.get("score", 0) or 0
+            created_at = str(memory.get("created_at", ""))[:19]
+
+            # Escape content for JavaScript
+            escaped_content = content.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+
+            nodes_data.append({
+                "id": i,
+                "memoryId": memory_id[:12],
+                "content": escaped_content[:300],
+                "score": float(score) if score else 0,
+                "createdAt": created_at
+            })
+
+        nodes_json = json.dumps(nodes_data)
+
+        # Create the interactive node visualization
+        graph_html = f'''
+        <div id="memory-graph-container" style="position: relative; width: 100%; height: 500px; background: #0a0a0a; border: 1px solid #333; overflow: hidden;">
+            <canvas id="memoryCanvas" style="width: 100%; height: 100%;"></canvas>
+            <div id="tooltip" style="
+                display: none;
+                position: absolute;
+                background: #141414;
+                border: 1px solid #f96124;
+                border-left: 4px solid #f96124;
+                padding: 12px;
+                max-width: 350px;
+                font-family: 'JetBrains Mono', monospace;
+                font-size: 11px;
+                color: #ccc;
+                z-index: 1000;
+                box-shadow: 0 4px 20px rgba(249, 97, 36, 0.3);
+                pointer-events: none;
+            "></div>
+            <div style="position: absolute; bottom: 10px; left: 10px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #666;">
+                [HOVER NODES TO VIEW MEMORY CONTENT]
+            </div>
+            <div style="position: absolute; top: 10px; right: 10px; font-family: 'JetBrains Mono', monospace; font-size: 10px;">
+                <span style="color: #22c55e;">● HIGH</span>
+                <span style="color: #eab308; margin-left: 10px;">● MED</span>
+                <span style="color: #f96124; margin-left: 10px;">● LOW</span>
+            </div>
+        </div>
+
+        <script>
+        (function() {{
+            const nodes = {nodes_json};
+            const canvas = document.getElementById('memoryCanvas');
+            const container = document.getElementById('memory-graph-container');
+            const tooltip = document.getElementById('tooltip');
+            const ctx = canvas.getContext('2d');
+
+            // Set canvas size
+            function resizeCanvas() {{
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+            }}
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // Node properties
+            const nodeRadius = 8;
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+
+            // Position nodes in a force-directed-like layout
+            nodes.forEach((node, i) => {{
+                const angle = (i / nodes.length) * Math.PI * 2;
+                const radius = 120 + Math.random() * 100;
+                node.x = centerX + Math.cos(angle) * radius + (Math.random() - 0.5) * 60;
+                node.y = centerY + Math.sin(angle) * radius + (Math.random() - 0.5) * 60;
+                node.vx = 0;
+                node.vy = 0;
+            }});
+
+            // Create connections (connect nearby nodes and sequential nodes)
+            const connections = [];
+            for (let i = 0; i < nodes.length; i++) {{
+                // Connect to next node (temporal connection)
+                if (i < nodes.length - 1) {{
+                    connections.push([i, i + 1]);
+                }}
+                // Connect to some random nearby nodes
+                for (let j = i + 2; j < Math.min(i + 4, nodes.length); j++) {{
+                    if (Math.random() > 0.5) {{
+                        connections.push([i, j]);
+                    }}
+                }}
+            }}
+
+            // Get color based on score
+            function getNodeColor(score) {{
+                if (score >= 0.8) return '#22c55e';
+                if (score >= 0.5) return '#eab308';
+                return '#f96124';
+            }}
+
+            // Animation loop
+            let hoveredNode = null;
+            let animationFrame = 0;
+
+            function draw() {{
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                animationFrame++;
+
+                // Draw grid pattern
+                ctx.strokeStyle = '#1a1a1a';
+                ctx.lineWidth = 1;
+                for (let x = 0; x < canvas.width; x += 30) {{
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, canvas.height);
+                    ctx.stroke();
+                }}
+                for (let y = 0; y < canvas.height; y += 30) {{
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(canvas.width, y);
+                    ctx.stroke();
+                }}
+
+                // Draw connections
+                connections.forEach(([i, j]) => {{
+                    const nodeA = nodes[i];
+                    const nodeB = nodes[j];
+                    const gradient = ctx.createLinearGradient(nodeA.x, nodeA.y, nodeB.x, nodeB.y);
+                    gradient.addColorStop(0, getNodeColor(nodeA.score) + '40');
+                    gradient.addColorStop(1, getNodeColor(nodeB.score) + '40');
+
+                    ctx.beginPath();
+                    ctx.moveTo(nodeA.x, nodeA.y);
+                    ctx.lineTo(nodeB.x, nodeB.y);
+                    ctx.strokeStyle = gradient;
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }});
+
+                // Draw nodes
+                nodes.forEach((node, i) => {{
+                    const isHovered = hoveredNode === i;
+                    const color = getNodeColor(node.score);
+                    const radius = isHovered ? nodeRadius * 1.8 : nodeRadius;
+
+                    // Glow effect
+                    if (isHovered) {{
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, radius + 15, 0, Math.PI * 2);
+                        const glowGradient = ctx.createRadialGradient(node.x, node.y, radius, node.x, node.y, radius + 15);
+                        glowGradient.addColorStop(0, color + '60');
+                        glowGradient.addColorStop(1, 'transparent');
+                        ctx.fillStyle = glowGradient;
+                        ctx.fill();
+                    }}
+
+                    // Outer ring
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, radius + 2, 0, Math.PI * 2);
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = isHovered ? 2 : 1;
+                    ctx.stroke();
+
+                    // Inner circle
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+                    ctx.fillStyle = isHovered ? color : '#0a0a0a';
+                    ctx.fill();
+
+                    // Center dot
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = color;
+                    ctx.fill();
+
+                    // Node number
+                    ctx.fillStyle = isHovered ? '#000' : '#666';
+                    ctx.font = '9px JetBrains Mono, monospace';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(String(i + 1).padStart(2, '0'), node.x, node.y);
+                }});
+
+                // Pulse effect on connections
+                const pulsePos = (animationFrame % 100) / 100;
+                connections.forEach(([i, j]) => {{
+                    const nodeA = nodes[i];
+                    const nodeB = nodes[j];
+                    const px = nodeA.x + (nodeB.x - nodeA.x) * pulsePos;
+                    const py = nodeA.y + (nodeB.y - nodeA.y) * pulsePos;
+
+                    ctx.beginPath();
+                    ctx.arc(px, py, 2, 0, Math.PI * 2);
+                    ctx.fillStyle = '#f9612440';
+                    ctx.fill();
+                }});
+
+                requestAnimationFrame(draw);
+            }}
+
+            // Mouse interaction
+            canvas.addEventListener('mousemove', (e) => {{
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                const mouseX = (e.clientX - rect.left) * scaleX;
+                const mouseY = (e.clientY - rect.top) * scaleY;
+
+                hoveredNode = null;
+                for (let i = 0; i < nodes.length; i++) {{
+                    const node = nodes[i];
+                    const dist = Math.sqrt((mouseX - node.x) ** 2 + (mouseY - node.y) ** 2);
+                    if (dist < nodeRadius + 5) {{
+                        hoveredNode = i;
+                        break;
+                    }}
+                }}
+
+                if (hoveredNode !== null) {{
+                    const node = nodes[hoveredNode];
+                    const color = getNodeColor(node.score);
+                    tooltip.innerHTML = `
+                        <div style="color: ${{color}}; margin-bottom: 8px; font-size: 12px;">
+                            [NODE ${{String(hoveredNode + 1).padStart(3, '0')}}]
+                        </div>
+                        <div style="color: #666; margin-bottom: 6px; font-size: 10px;">
+                            ID: ${{node.memoryId}}... | ${{node.createdAt || 'N/A'}}
+                        </div>
+                        <div style="color: #aaa; line-height: 1.5; font-size: 11px; max-height: 150px; overflow: hidden;">
+                            ${{node.content}}
+                        </div>
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;">
+                            <span style="color: ${{color}};">SCORE: ${{node.score.toFixed(2)}}</span>
+                        </div>
+                    `;
+                    tooltip.style.display = 'block';
+
+                    // Position tooltip
+                    const tooltipX = e.clientX - container.getBoundingClientRect().left + 15;
+                    const tooltipY = e.clientY - container.getBoundingClientRect().top + 15;
+
+                    // Keep tooltip in bounds
+                    const maxX = container.clientWidth - tooltip.offsetWidth - 10;
+                    const maxY = container.clientHeight - tooltip.offsetHeight - 10;
+
+                    tooltip.style.left = Math.min(tooltipX, maxX) + 'px';
+                    tooltip.style.top = Math.min(tooltipY, maxY) + 'px';
+
+                    canvas.style.cursor = 'pointer';
+                }} else {{
+                    tooltip.style.display = 'none';
+                    canvas.style.cursor = 'default';
+                }}
+            }});
+
+            canvas.addEventListener('mouseleave', () => {{
+                hoveredNode = null;
+                tooltip.style.display = 'none';
+            }});
+
+            draw();
+        }})();
+        </script>
+        '''
+
+        st.components.v1.html(graph_html, height=550)
+
+        # Show count indicator
+        if total_count > 50:
+            st.markdown(f"""
+            <div style="text-align: center; padding: 0.5rem; color: #666; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;">
+                Displaying 50 of {total_count} memories
+            </div>
+            """, unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div class="industrial-plate" style="border-left: 4px solid #666; text-align: center; padding: 2rem;">
+            <div style="color: #666; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;">
+                [NO MEMORIES FOUND]
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Close button
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("[CLOSE_MEMORY_VIEW]", use_container_width=True):
+        memory_key = f"show_memory_{st.session_state.active_dataset}"
+        st.session_state[memory_key] = False
+        st.rerun()
 
 
 # ==================== VIEW: DATA VIEWER ====================
@@ -1675,8 +2157,8 @@ def render_data_viewer():
                 # Export options
                 st.markdown("---")
                 st.markdown("### EXPORT_OPTIONS")
-                
-                col_dl, col_del = st.columns(2)
+
+                col_dl, col_mem, col_del = st.columns(3)
                 with col_dl:
                     # Download button
                     jsonl_content = "\n".join([json.dumps(s, ensure_ascii=False) for s in dataset.samples])
@@ -1687,6 +2169,12 @@ def render_data_viewer():
                         mime="application/json",
                         use_container_width=True
                     )
+                with col_mem:
+                    # Memory visualization toggle
+                    memory_key = f"show_memory_{st.session_state.active_dataset}"
+                    if st.button("[VIEW_MEMORY]", use_container_width=True):
+                        st.session_state[memory_key] = not st.session_state.get(memory_key, False)
+                        st.rerun()
                 with col_del:
                     if st.button("[DELETE_DATASET]", use_container_width=True, type="secondary"):
                         # Delete file and remove from state
@@ -1698,6 +2186,11 @@ def render_data_viewer():
                             st.rerun()
                         except Exception as e:
                             st.error(f"[ERROR] Error deleting: {e}")
+
+                # Memory visualization section
+                memory_key = f"show_memory_{st.session_state.active_dataset}"
+                if st.session_state.get(memory_key, False):
+                    render_memory_visualization(dataset)
         else:
             st.info("[INFO] Select a dataset to view its contents")
     
@@ -2014,10 +2507,6 @@ def render_finetuning():
                     </div>
                     """, unsafe_allow_html=True)
                 
-                # Auto-refresh every 2 seconds
-                time.sleep(2)
-                st.rerun()
-                
             elif training_status.is_complete:
                 st.markdown(f"""
                 <div class="industrial-plate" style="border-left: 3px solid #22c55e;">
@@ -2043,6 +2532,11 @@ def render_finetuning():
             st.markdown("#### TRAINING_LOG")
             log_output = "\n".join(training_status.output_lines[-80:])  # Last 80 lines
             st.code(log_output, language="text", line_numbers=False)
+            
+            # Auto-refresh if running (moved here to ensure logs render first)
+            if training_status.is_running:
+                time.sleep(2)
+                st.rerun()
             
             # Reset button (only when not running)
             if not training_status.is_running:
@@ -2776,6 +3270,282 @@ Please provide:
         
         with st.expander("[VIEW_DEFENDER_OUTPUT]"):
             st.code(results.get('base', {}).get('output', ''), language="text")
+
+
+# ==================== VIEW: HUGGINGFACE DEPLOY ====================
+
+def render_hf_deploy():
+    """Render the HuggingFace deployment page for uploading models and datasets."""
+    
+    # Header with navigation
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.markdown("""
+        <h1 style="color: white; font-size: 2rem; font-weight: 900; text-transform: uppercase; letter-spacing: 0.1em;">
+            🤗 HUGGINGFACE DEPLOY
+        </h1>
+        <p style="color: #8c6b5d; font-size: 0.8rem;">
+            Upload your fine-tuned models and datasets to HuggingFace Hub
+        </p>
+        """, unsafe_allow_html=True)
+    with col2:
+        if st.button("[DASHBOARD]", use_container_width=True):
+            st.session_state.view = 'dashboard'
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # HuggingFace Token Setup
+    st.markdown("### 🔑 AUTHENTICATION")
+    
+    hf_token = st.text_input(
+        "HuggingFace Token",
+        type="password",
+        value=st.session_state.get('hf_token', ''),
+        placeholder="hf_xxxxxxxxxxxxxxxxxxxx",
+        help="Get your token from https://huggingface.co/settings/tokens"
+    )
+    if hf_token:
+        st.session_state.hf_token = hf_token
+        st.success("✓ Token configured")
+    else:
+        st.warning("⚠️ Enter your HuggingFace token to enable uploads")
+        st.markdown("""
+        <div style="background: #1a1008; border-left: 3px solid #ff6b35; padding: 0.75rem; margin: 0.5rem 0; font-size: 0.85rem;">
+            <strong>Get a token:</strong> Visit <a href="https://huggingface.co/settings/tokens" target="_blank" style="color: #f96124;">huggingface.co/settings/tokens</a>
+            and create a token with <code>write</code> permissions.
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Two columns: Models and Datasets
+    col_models, col_datasets = st.columns(2)
+    
+    # ==================== MODEL UPLOAD ====================
+    with col_models:
+        st.markdown("### 🧠 UPLOAD MODEL")
+        
+        # Scan for available models
+        models_dir = Path("work/models")
+        available_models = []
+        if models_dir.exists():
+            for model_path in models_dir.iterdir():
+                if model_path.is_dir() and (model_path / "adapter_config.json").exists():
+                    available_models.append(model_path.name)
+                elif model_path.is_dir() and (model_path / "config.json").exists():
+                    available_models.append(model_path.name)
+        
+        if available_models:
+            selected_model = st.selectbox(
+                "Select Model",
+                available_models,
+                key="hf_model_select"
+            )
+            
+            # Repository settings
+            st.markdown("##### Repository Settings")
+            
+            hf_username = st.text_input(
+                "HuggingFace Username",
+                value=st.session_state.get('hf_username', ''),
+                placeholder="your-username",
+                key="hf_username_model"
+            )
+            if hf_username:
+                st.session_state.hf_username = hf_username
+            
+            repo_name = st.text_input(
+                "Repository Name",
+                value=selected_model if selected_model else "",
+                placeholder="my-awesome-model",
+                key="hf_repo_name_model"
+            )
+            
+            private_repo = st.checkbox("Private Repository", value=False, key="hf_private_model")
+            
+            # Model card
+            with st.expander("📝 Model Card (Optional)"):
+                model_description = st.text_area(
+                    "Description",
+                    placeholder="A fine-tuned model for...",
+                    height=100,
+                    key="hf_model_desc"
+                )
+            
+            # Upload button
+            if st.button("🚀 UPLOAD MODEL", type="primary", use_container_width=True, key="upload_model_btn"):
+                if not hf_token:
+                    st.error("[ERROR] Please enter your HuggingFace token")
+                elif not hf_username:
+                    st.error("[ERROR] Please enter your HuggingFace username")
+                elif not repo_name:
+                    st.error("[ERROR] Please enter a repository name")
+                else:
+                    with st.spinner(f"Uploading {selected_model} to HuggingFace..."):
+                        try:
+                            from huggingface_hub import HfApi, create_repo
+                            
+                            api = HfApi(token=hf_token)
+                            repo_id = f"{hf_username}/{repo_name}"
+                            
+                            # Create repo if it doesn't exist
+                            try:
+                                create_repo(repo_id, token=hf_token, private=private_repo, exist_ok=True)
+                            except Exception as e:
+                                if "already exists" not in str(e).lower():
+                                    raise e
+                            
+                            # Upload folder
+                            model_path = models_dir / selected_model
+                            api.upload_folder(
+                                folder_path=str(model_path),
+                                repo_id=repo_id,
+                                commit_message=f"Upload {selected_model} via ModelForge"
+                            )
+                            
+                            st.success(f"✓ Model uploaded successfully!")
+                            st.markdown(f"""
+                            <div style="background: #0a2810; border: 1px solid #22c55e; padding: 1rem; margin-top: 0.5rem;">
+                                <strong>🎉 Your model is live!</strong><br>
+                                <a href="https://huggingface.co/{repo_id}" target="_blank" style="color: #22c55e;">
+                                    https://huggingface.co/{repo_id}
+                                </a>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        except Exception as e:
+                            st.error(f"[ERROR] Upload failed: {str(e)}")
+        else:
+            st.info("📦 No models found in `work/models/`. Train a model first!")
+            if st.button("[GO_TO_TRAINING]", use_container_width=True):
+                st.session_state.view = 'fine_tuning'
+                st.rerun()
+    
+    # ==================== DATASET UPLOAD ====================
+    with col_datasets:
+        st.markdown("### 📊 UPLOAD DATASET")
+        
+        # Scan for available datasets
+        data_dir = Path("data")
+        available_datasets = []
+        if data_dir.exists():
+            for file_path in data_dir.iterdir():
+                if file_path.suffix in ['.jsonl', '.json', '.csv', '.parquet']:
+                    available_datasets.append(file_path.name)
+        
+        if available_datasets:
+            selected_dataset = st.selectbox(
+                "Select Dataset",
+                available_datasets,
+                key="hf_dataset_select"
+            )
+            
+            # Show dataset preview
+            if selected_dataset:
+                dataset_path = data_dir / selected_dataset
+                try:
+                    if selected_dataset.endswith('.jsonl'):
+                        with open(dataset_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()[:5]
+                        st.caption(f"Preview ({len(lines)} of {sum(1 for _ in open(dataset_path, 'r', encoding='utf-8'))} samples):")
+                        for line in lines:
+                            st.json(json.loads(line))
+                    elif selected_dataset.endswith('.json'):
+                        with open(dataset_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        if isinstance(data, list):
+                            st.caption(f"Preview (first 3 of {len(data)} samples):")
+                            for item in data[:3]:
+                                st.json(item)
+                except Exception as e:
+                    st.warning(f"Could not preview: {e}")
+            
+            # Repository settings
+            st.markdown("##### Repository Settings")
+            
+            hf_username_ds = st.text_input(
+                "HuggingFace Username",
+                value=st.session_state.get('hf_username', ''),
+                placeholder="your-username",
+                key="hf_username_dataset"
+            )
+            if hf_username_ds:
+                st.session_state.hf_username = hf_username_ds
+            
+            dataset_repo_name = st.text_input(
+                "Repository Name",
+                value=selected_dataset.rsplit('.', 1)[0] if selected_dataset else "",
+                placeholder="my-awesome-dataset",
+                key="hf_repo_name_dataset"
+            )
+            
+            private_ds_repo = st.checkbox("Private Repository", value=False, key="hf_private_dataset")
+            
+            # Upload button
+            if st.button("🚀 UPLOAD DATASET", type="primary", use_container_width=True, key="upload_dataset_btn"):
+                if not hf_token:
+                    st.error("[ERROR] Please enter your HuggingFace token")
+                elif not hf_username_ds:
+                    st.error("[ERROR] Please enter your HuggingFace username")
+                elif not dataset_repo_name:
+                    st.error("[ERROR] Please enter a repository name")
+                else:
+                    with st.spinner(f"Uploading {selected_dataset} to HuggingFace..."):
+                        try:
+                            from huggingface_hub import HfApi, create_repo
+                            
+                            api = HfApi(token=hf_token)
+                            repo_id = f"{hf_username_ds}/{dataset_repo_name}"
+                            
+                            # Create dataset repo
+                            try:
+                                create_repo(repo_id, token=hf_token, private=private_ds_repo, 
+                                           repo_type="dataset", exist_ok=True)
+                            except Exception as e:
+                                if "already exists" not in str(e).lower():
+                                    raise e
+                            
+                            # Upload file
+                            dataset_path = data_dir / selected_dataset
+                            api.upload_file(
+                                path_or_fileobj=str(dataset_path),
+                                path_in_repo=selected_dataset,
+                                repo_id=repo_id,
+                                repo_type="dataset",
+                                commit_message=f"Upload {selected_dataset} via ModelForge"
+                            )
+                            
+                            st.success(f"✓ Dataset uploaded successfully!")
+                            st.markdown(f"""
+                            <div style="background: #0a2810; border: 1px solid #22c55e; padding: 1rem; margin-top: 0.5rem;">
+                                <strong>🎉 Your dataset is live!</strong><br>
+                                <a href="https://huggingface.co/datasets/{repo_id}" target="_blank" style="color: #22c55e;">
+                                    https://huggingface.co/datasets/{repo_id}
+                                </a>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        except Exception as e:
+                            st.error(f"[ERROR] Upload failed: {str(e)}")
+        else:
+            st.info("📦 No datasets found in `data/`. Generate some data first!")
+            if st.button("[GO_TO_DASHBOARD]", use_container_width=True):
+                st.session_state.view = 'dashboard'
+                st.rerun()
+    
+    # Tips section
+    st.markdown("---")
+    st.markdown("### 💡 TIPS")
+    st.markdown("""
+    <div style="background: #111; border: 1px solid #333; padding: 1rem; font-size: 0.85rem;">
+        <ul style="margin: 0; padding-left: 1.5rem; color: #888;">
+            <li><strong>Model uploads</strong> include all adapter files (LoRA weights, config, tokenizer)</li>
+            <li><strong>Dataset uploads</strong> preserve the original format (JSONL, JSON, CSV, Parquet)</li>
+            <li>Use <strong>private repositories</strong> for proprietary data or models</li>
+            <li>After upload, you can load models with: <code>model = AutoModel.from_pretrained("username/repo")</code></li>
+            <li>After upload, you can load datasets with: <code>dataset = load_dataset("username/repo")</code></li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
